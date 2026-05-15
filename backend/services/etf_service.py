@@ -46,6 +46,41 @@ def _code_to_sina_symbol(code: str) -> str:
         return f"sz{code}"
 
 
+def _code_to_tencent(code: str) -> str:
+    """
+    ETF 代码转腾讯行情代码
+    5xxxxx → sh5xxxxx (上海)
+    1xxxxx → sz1xxxxx (深圳)
+    """
+    if code.startswith(("5", "6")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _fetch_realtime_price(code: str) -> float | None:
+    """
+    从腾讯接口获取实时价格
+
+    Returns:
+        实时价格（float），获取失败返回 None
+    """
+    tencent_code = _code_to_tencent(code)
+    try:
+        r = requests.get(
+            f"https://qt.gtimg.cn/q={tencent_code}",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8,
+        )
+        r.encoding = "gbk"
+        fields = r.text.split("~")
+        if len(fields) > 4:
+            price = float(fields[3])
+            return price if price > 0 else None
+    except Exception:
+        pass
+    return None
+
+
 def _get_cached(code: str) -> pd.DataFrame | None:
     """从缓存获取数据，过期则返回 None"""
     if code in _cache:
@@ -171,19 +206,33 @@ def _build_result(etf_code: str, df: pd.DataFrame) -> dict:
 
     包含:
     - records: 完整历史记录列表
-    - summary: 最新价、年内最高/最低、估值百分位
+    - summary: 最新价（含盘中实时价）、年内最高/最低、估值百分位
     """
     records = df.to_dict(orient="records")
 
     close_series = df["close"].dropna()
-    latest_close = float(close_series.iloc[-1]) if len(close_series) > 0 else 0
+    kline_close = float(close_series.iloc[-1]) if len(close_series) > 0 else 0
+
+    # 获取实时价格（盘中有效，盘后返回 None）
+    realtime_price = _fetch_realtime_price(etf_code)
+    latest_close = realtime_price if realtime_price is not None else kline_close
+
+    # 用实时价格计算百分位（将实时价追加到序列末尾再算）
+    if realtime_price is not None:
+        calc_series = close_series.copy()
+        calc_series.iloc[-1] = realtime_price
+    else:
+        calc_series = close_series
+
+    # 更新 year_high/year_low（实时价可能突破区间）
+    series_for_range = pd.concat([calc_series, pd.Series([latest_close])]) if realtime_price else calc_series
 
     summary = {
         "latest_date": df["date"].iloc[-1] if len(df) > 0 else "",
         "latest_close": round(latest_close, 4),
-        "year_high": round(float(close_series.max()), 4),
-        "year_low": round(float(close_series.min()), 4),
-        "percentile": _calc_percentile(close_series),
+        "year_high": round(float(series_for_range.max()), 4),
+        "year_low": round(float(series_for_range.min()), 4),
+        "percentile": _calc_percentile(calc_series),
     }
 
     return {
