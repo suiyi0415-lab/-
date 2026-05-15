@@ -1,0 +1,7 @@
+# 量化监控看板后端依赖
+fastapi==0.115.0
+uvicorn==0.30.0
+akshare==1.18.60
+pandas>=2.0
+pydantic>=2.0
+requests>=2.28
