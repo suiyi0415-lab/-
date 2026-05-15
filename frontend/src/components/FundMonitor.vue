@@ -1,5 +1,5 @@
 <template>
-  <div class="card" :class="cardState">
+  <div class="card" :class="cardState" @click="emit('click')">
     <div class="card-top">
       <div class="card-id">
         <span class="card-code mono">{{ fundCode }}</span>
@@ -56,6 +56,8 @@ const props = defineProps({
   fundName: { type: String, default: '' },
 })
 
+const emit = defineEmits(['click'])
+
 const loading = ref(true)
 const summary = ref({})
 const pct = ref(0)
@@ -106,6 +108,7 @@ onMounted(async () => {
   border: 1px solid var(--border-default);
   border-radius: 6px;
   overflow: hidden;
+  cursor: pointer;
 }
 
 .card:hover {

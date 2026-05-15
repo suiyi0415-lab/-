@@ -28,9 +28,9 @@
           <span class="panel-hint">估值分位 &lt; 20% 适合加仓</span>
         </div>
         <div class="grid-3">
-          <FundMonitor fund-code="512010" fund-name="医药ETF" />
-          <FundMonitor fund-code="159915" fund-name="创业板ETF" />
-          <FundMonitor fund-code="513180" fund-name="恒生科技ETF" />
+          <FundMonitor fund-code="512010" fund-name="医药ETF" @click="openDrawer('512010', '医药ETF')" />
+          <FundMonitor fund-code="159915" fund-name="创业板ETF" @click="openDrawer('159915', '创业板ETF')" />
+          <FundMonitor fund-code="513180" fund-name="恒生科技ETF" @click="openDrawer('513180', '恒生科技ETF')" />
         </div>
       </div>
 
@@ -39,6 +39,13 @@
         <StockFlowTable :stocks="['300308', '300394']" />
       </div>
     </main>
+
+    <!-- 基金详情抽屉 -->
+    <FundDetailDrawer
+      v-model:visible="drawerVisible"
+      :fund-code="drawerCode"
+      :fund-name="drawerName"
+    />
   </div>
 </template>
 
@@ -46,9 +53,21 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import FundMonitor from './components/FundMonitor.vue'
 import StockFlowTable from './components/StockFlowTable.vue'
+import FundDetailDrawer from './components/FundDetailDrawer.vue'
 
 const currentTime = ref('')
 let timer = null
+
+// 抽屉状态
+const drawerVisible = ref(false)
+const drawerCode = ref('')
+const drawerName = ref('')
+
+function openDrawer(code, name) {
+  drawerCode.value = code
+  drawerName.value = name
+  drawerVisible.value = true
+}
 
 function updateTime() {
   const d = new Date()
