@@ -5,6 +5,7 @@
 功能: 获取 ETF/基金的历史单位净值、累计净值、日增长率
 """
 import time
+import requests
 import akshare as ak
 import pandas as pd
 
@@ -145,6 +146,207 @@ def fetch_fund_history(fund_code: str, period: str = "1y") -> dict:
     }
 
     # 8. 写入缓存
+    _set_cache(cache_key, result)
+
+    return result
+
+
+# ============================================================
+# 基金穿透 - 前十大重仓股实时监控
+# ============================================================
+
+# 腾讯批量行情接口
+TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+TENCENT_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "text/plain"}
+
+
+def _stock_to_tencent(code: str) -> str:
+    """
+    A 股代码转腾讯格式: 6xxxxx → sh6xxxxx, 0/3xxxxx → sz0/3xxxxx
+    """
+    if code.startswith(("6", "5")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def _batch_realtime_quotes(codes: list[str]) -> dict:
+    """
+    批量获取实时行情（腾讯接口）
+
+    Returns:
+        {"600276": {"name": "恒瑞医药", "price": 53.99, "pct_change": -0.61}, ...}
+    """
+    if not codes:
+        return {}
+
+    tencent_codes = ",".join(_stock_to_tencent(c) for c in codes)
+    try:
+        r = requests.get(
+            f"{TENCENT_QUOTE_URL}{tencent_codes}",
+            headers=TENCENT_HEADERS,
+            timeout=10,
+        )
+        r.encoding = "gbk"
+    except Exception:
+        return {}
+
+    result = {}
+    for line in r.text.strip().split(";"):
+        line = line.strip()
+        if not line:
+            continue
+        fields = line.split("~")
+        if len(fields) < 33:
+            continue
+        code = fields[2]
+        try:
+            result[code] = {
+                "name": fields[1],
+                "price": float(fields[3]) if fields[3] else 0,
+                "pct_change": float(fields[32]) if fields[32] else 0,
+            }
+        except (ValueError, IndexError):
+            continue
+    return result
+
+
+def _batch_fund_flow(codes: list[str]) -> dict:
+    """
+    批量获取个股主力净流入（AkShare，可能因网络失败）
+
+    Returns:
+        {"600276": {"main_net_inflow": -1234567}, ...}
+    """
+    from backend.services.stock_service import _get_market
+
+    result = {}
+    for code in codes:
+        try:
+            market = _get_market(code)
+            df = ak.stock_individual_fund_flow(stock=code, market=market)
+            if df is not None and not df.empty:
+                # 找到"主力净流入-净额"列
+                for col in df.columns:
+                    if "主力净流入" in str(col) and "净额" in str(col):
+                        val = pd.to_numeric(df[col].iloc[-1], errors="coerce")
+                        result[code] = {"main_net_inflow": float(val) if pd.notna(val) else 0}
+                        break
+        except Exception:
+            # 单只失败不影响整体
+            pass
+        time.sleep(0.3)  # 控制请求频率
+    return result
+
+
+def fetch_fund_holdings_radar(fund_code: str) -> dict:
+    """
+    基金穿透：获取前十大重仓股的实时涨跌幅与资金动向
+
+    Args:
+        fund_code: ETF/基金代码，如 "512010"
+
+    Returns:
+        {
+            "fund_code": "512010",
+            "quarter": "2025年1季度",
+            "estimated_pct": -0.82,
+            "holdings": [
+                {
+                    "rank": 1,
+                    "stock_code": "600276",
+                    "stock_name": "恒瑞医药",
+                    "weight": 17.39,
+                    "price": 53.99,
+                    "pct_change": -0.61,
+                    "main_net_inflow": -12345678
+                }, ...
+            ]
+        }
+    """
+    if not _validate_fund_code(fund_code):
+        raise ValueError(f"基金代码格式错误: '{fund_code}'，应为 6 位数字")
+
+    # 缓存检查
+    cache_key = f"holdings_{fund_code}"
+    cached = _get_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    # 1. 获取最新季度重仓股
+    max_retries = 3
+    last_error = None
+    df = None
+
+    for attempt in range(max_retries):
+        try:
+            # 用最近的年份尝试
+            from datetime import datetime
+            year = str(datetime.now().year)
+            df = ak.fund_portfolio_hold_em(symbol=fund_code, date=year)
+            if df is None or df.empty:
+                # 尝试上一年
+                df = ak.fund_portfolio_hold_em(symbol=fund_code, date=str(int(year) - 1))
+            break
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                time.sleep(1)
+    else:
+        raise ConnectionError(f"获取重仓股失败（重试 {max_retries} 次）: {last_error}")
+
+    if df is None or df.empty:
+        raise ValueError(f"基金代码 '{fund_code}' 未查询到重仓股数据")
+
+    # 2. 取最新季度的前 10 只
+    quarter = df["季度"].iloc[0] if "季度" in df.columns else ""
+    top10 = df.head(10).copy()
+
+    # 提取股票代码和权重
+    stock_codes = []
+    weights = {}
+    for _, row in top10.iterrows():
+        code = str(row.get("股票代码", "")).zfill(6)
+        stock_codes.append(code)
+        weights[code] = float(row.get("占净值比例", 0))
+
+    # 3. 批量获取实时行情
+    quotes = _batch_realtime_quotes(stock_codes)
+
+    # 4. 尝试获取资金流向（可能失败，不影响主流程）
+    flows = _batch_fund_flow(stock_codes)
+
+    # 5. 组合数据
+    holdings = []
+    for i, code in enumerate(stock_codes):
+        quote = quotes.get(code, {})
+        flow = flows.get(code, {})
+        holdings.append({
+            "rank": i + 1,
+            "stock_code": code,
+            "stock_name": quote.get("name", top10.iloc[i].get("股票名称", "")),
+            "weight": weights.get(code, 0),
+            "price": quote.get("price", 0),
+            "pct_change": quote.get("pct_change", 0),
+            "main_net_inflow": flow.get("main_net_inflow"),
+        })
+
+    # 6. 计算估算当日涨跌幅 = Σ(单只涨跌幅 × 权重) / Σ(权重)
+    total_weight = sum(h["weight"] for h in holdings)
+    if total_weight > 0:
+        estimated_pct = sum(
+            h["pct_change"] * h["weight"] for h in holdings
+        ) / total_weight
+    else:
+        estimated_pct = 0.0
+
+    result = {
+        "fund_code": fund_code,
+        "quarter": quarter,
+        "estimated_pct": round(estimated_pct, 2),
+        "holdings": holdings,
+    }
+
+    # 写入缓存
     _set_cache(cache_key, result)
 
     return result
