@@ -350,3 +350,134 @@ def fetch_fund_holdings_radar(fund_code: str) -> dict:
     _set_cache(cache_key, result)
 
     return result
+
+
+# ============================================================
+# 实时分时数据 - 供 ECharts 走势图使用
+# ============================================================
+
+TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query"
+
+
+def _code_to_tencent(code: str) -> str:
+    """ETF 代码转腾讯格式"""
+    if code.startswith(("5", "6")):
+        return f"sh{code}"
+    return f"sz{code}"
+
+
+def fetch_fund_intraday(code: str) -> dict:
+    """
+    获取今日分时数据（1 分钟级）
+
+    Args:
+        code: ETF/股票代码，如 "512010"
+
+    Returns:
+        {
+            "code": "512010",
+            "date": "2026-05-15",
+            "pre_close": 0.360,
+            "records": [
+                {"time": "09:30", "price": 0.359, "avg_price": 0.359, "volume": 90743},
+                {"time": "09:31", "price": 0.359, "avg_price": 0.359, "volume": 577300},
+                ...
+            ]
+        }
+    """
+    if not _validate_fund_code(code):
+        raise ValueError(f"代码格式错误: '{code}'，应为 6 位数字")
+
+    # 缓存（分时数据 30 秒刷新一次）
+    cache_key = f"intraday_{code}"
+    if code in _cache:
+        entry = _cache[code]
+        if time.time() - entry["time"] < 30 and entry.get("key") == cache_key:
+            return entry["data"]
+
+    tencent_code = _code_to_tencent(code)
+
+    try:
+        r = requests.get(
+            TENCENT_MINUTE_URL,
+            params={"code": tencent_code},
+            headers=TENCENT_HEADERS,
+            timeout=10,
+        )
+        r.raise_for_status()
+        raw = r.json()
+    except Exception as e:
+        raise ConnectionError(f"分时数据请求失败: {str(e)}")
+
+    # 解析数据
+    stock_data = raw.get("data", {}).get(tencent_code, {})
+    minute_list = stock_data.get("data", {}).get("data", [])
+
+    if not minute_list:
+        raise ValueError(f"代码 '{code}' 今日暂无分时数据（可能未开盘）")
+
+    # 昨收价
+    pre_close = stock_data.get("data", {}).get("pre_close", 0)
+    try:
+        pre_close = float(pre_close)
+    except (ValueError, TypeError):
+        pre_close = 0
+
+    # 清洗为列表（腾讯数据为累积量，需做差值得每分钟数据）
+    records = []
+    prev_vol = 0
+    prev_amount = 0.0
+
+    for item in minute_list:
+        parts = str(item).split()
+        if len(parts) < 3:
+            continue
+
+        # 时间: HHMM → HH:MM
+        raw_time = parts[0]
+        if len(raw_time) == 4:
+            time_str = f"{raw_time[:2]}:{raw_time[2:]}"
+        else:
+            time_str = raw_time
+
+        try:
+            price = float(parts[1])
+            cum_vol = int(parts[2])
+            cum_amount = float(parts[3]) if len(parts) > 3 else 0
+        except (ValueError, IndexError):
+            continue
+
+        # 差值：每分钟成交量和成交额
+        minute_vol = max(cum_vol - prev_vol, 0)
+        minute_amount = max(cum_amount - prev_amount, 0.0)
+        prev_vol = cum_vol
+        prev_amount = cum_amount
+
+        # 均价 = 每分钟成交额 / 每分钟成交量（和 price 同单位）
+        if minute_vol > 0 and minute_amount > 0:
+            avg_price = round(minute_amount / minute_vol / 100, 4)
+        else:
+            avg_price = price
+
+        records.append({
+            "time": time_str,
+            "price": price,
+            "avg_price": avg_price,
+            "volume": minute_vol,
+        })
+
+    # 获取日期（用最后一条数据的时间推断）
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    result = {
+        "code": code,
+        "date": today,
+        "pre_close": pre_close,
+        "records": records,
+    }
+
+    # 写入缓存（用特殊 key 标记）
+    _cache[code] = {"data": result, "time": time.time(), "key": cache_key}
+
+    return result

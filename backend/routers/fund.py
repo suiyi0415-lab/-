@@ -4,7 +4,7 @@
 GET /api/fund/history?fund_code=512010&period=1y
 """
 from fastapi import APIRouter, Query
-from backend.services.fund_service import fetch_fund_history, fetch_fund_holdings_radar
+from backend.services.fund_service import fetch_fund_history, fetch_fund_holdings_radar, fetch_fund_intraday
 from backend.utils.response import success, error
 
 router = APIRouter()
@@ -47,6 +47,28 @@ async def get_holdings_radar(
     """
     try:
         data = fetch_fund_holdings_radar(fund_code)
+        return success(data=data)
+    except ValueError as e:
+        return error(msg=str(e), code=400)
+    except ConnectionError as e:
+        return error(msg=str(e), code=502)
+    except Exception as e:
+        return error(msg=f"服务器内部错误: {str(e)}", code=500)
+
+
+@router.get("/intraday")
+async def get_fund_intraday(
+    code: str = Query(..., description="ETF/股票代码，如 512010"),
+):
+    """
+    获取今日分时数据（1 分钟级）
+
+    - **code**: ETF 或股票代码（6 位数字）
+
+    返回: 每分钟的时间、价格、均价、成交量，供 ECharts 走势图使用
+    """
+    try:
+        data = fetch_fund_intraday(code)
         return success(data=data)
     except ValueError as e:
         return error(msg=str(e), code=400)
